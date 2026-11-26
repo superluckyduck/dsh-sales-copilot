@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Sales Copilot",
+    "description": "Bilingual sales co-pilot: product and customer records, an instant FAQ lookup with keyword matching and read-aloud English answers, stored as local JSON.",
+    "detail": "docs/DETAIL.md"
+  }
+}

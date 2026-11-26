@@ -1,0 +1,12 @@
+# dsh-sales-copilot bundle patch: mounts the host half (data store, same-origin
+# JSON API, and the `sales_copilot` agent tool). The browser panel ships in the
+# same package and is discovered through the package.json `dsh.client` block.
+#
+# Install from the workspace:
+#   plugin_manager { action: "install_bundle", target: "<absolute dir>" }
+#
+# Set a custom data directory by adding `config.dataRoot` to the row below.
+
+- insert:
+    - id: sales-copilot
+      name: dsh-sales-copilot

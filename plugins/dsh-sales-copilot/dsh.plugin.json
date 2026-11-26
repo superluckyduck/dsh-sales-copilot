@@ -1,0 +1,9 @@
+{
+  "name": "dsh-sales-copilot",
+  "description": "Bilingual sales co-pilot: product & customer records, a fast FAQ library with keyword matching, and a browser panel.",
+  "version": "0.1.0",
+  "entry": {
+    "name": "dsh-sales-copilot",
+    "inject": ["webServer", "tools"]
+  }
+}

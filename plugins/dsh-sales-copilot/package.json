@@ -1,0 +1,41 @@
+{
+  "name": "dsh-sales-copilot",
+  "version": "0.3.3",
+  "private": true,
+  "type": "module",
+  "description": "FAQ library + real-time call assist + role-play room with speech and call-import on top of dsh-live-captions",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "dsh.plugin.json",
+    "locale/*.json",
+    "docs",
+    "icon.svg",
+    "README.md",
+    "scripts"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  },
+  "scripts": {
+    "selftest": "node scripts/selftest.mjs"
+  }
+}

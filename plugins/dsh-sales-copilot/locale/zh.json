@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "销售助手",
+    "description": "中英双语销售助手：产品与客户档案、高频问答秒查（关键词匹配 + 英文照读句），本地 JSON 存储。",
+    "detail": "docs/DETAIL.md"
+  }
+}
