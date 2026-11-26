@@ -1,0 +1,9 @@
+{
+  "name": "dsh-sales-copilot",
+  "description": "开箱即用的中英双语销售助手：FAQ 快查、实时通话辅助、语音对练、通话纪要和客户画像。",
+  "version": "0.3.3",
+  "entry": {
+    "name": "dsh-sales-copilot",
+    "inject": ["webServer", "tools"]
+  }
+}

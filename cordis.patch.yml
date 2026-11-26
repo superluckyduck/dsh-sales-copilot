@@ -1,0 +1,4 @@
+# Installable root bundle for dsh-sales-copilot.
+- insert:
+    - id: sales-copilot
+      name: dsh-sales-copilot
