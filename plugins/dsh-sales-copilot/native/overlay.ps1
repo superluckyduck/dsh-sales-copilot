@@ -1,5 +1,6 @@
 ﻿param(
   [string]$ApiUrl = 'http://127.0.0.1:54525/sales-copilot/api',
+  [string]$PidFile = '',
   [switch]$SelfTest
 )
 
@@ -8,6 +9,13 @@
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+
+# Record our PID so the plugin can close us precisely even after a DSH restart
+# lost its in-memory child handle. This file is our single source of truth for
+# "is an overlay window alive".
+if ($PidFile -ne '') {
+  try { [System.IO.File]::WriteAllText($PidFile, "$PID", [System.Text.Encoding]::ASCII) } catch { }
+}
 
 function Get-Newest {
   $payload = Invoke-RestMethod -Uri "$ApiUrl/rt/state" -TimeoutSec 3
@@ -36,7 +44,15 @@ Add-Type -Namespace Win32 -Name Native -MemberDefinition @'
 public static extern int GetWindowLong(System.IntPtr hWnd, int nIndex);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern int SetWindowLong(System.IntPtr hWnd, int nIndex, int dwNewLong);
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+public static extern bool RegisterHotKey(System.IntPtr hWnd, int id, uint fsModifiers, uint vk);
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+public static extern bool UnregisterHotKey(System.IntPtr hWnd, int id);
 '@
+
+# Ctrl+Alt+Q always closes the overlay, even when locked (mouse click-through).
+$script:hotkeyId = 0xBEEF
+$script:hotkeyRegistered = $false
 
 $script:locked = $false
 
@@ -139,11 +155,18 @@ $badge.Foreground = '#66FFFFFF'
 $badge.Margin = '0,8,0,0'
 $badge.Text = ''
 
+$hint = New-Object System.Windows.Controls.TextBlock
+$hint.FontSize = 10
+$hint.Foreground = '#55FFFFFF'
+$hint.Margin = '0,6,0,0'
+$hint.Text = 'Ctrl+Alt+Q 关闭 · 面板「收起浮层」也可关闭'
+
 [void]$outer.Children.Add($header)
 [void]$outer.Children.Add($heard)
 [void]$outer.Children.Add($zh)
 [void]$outer.Children.Add($en)
 [void]$outer.Children.Add($badge)
+[void]$outer.Children.Add($hint)
 $root.Child = $outer
 
 $root.Add_MouseLeftButtonDown({
@@ -199,8 +222,42 @@ function Update-Card {
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(900)
 $timer.Add_Tick({ Update-Card })
-$win.Add_Loaded({ $timer.Start() })
-$win.Add_Closed({ $timer.Stop() })
+$win.Add_Loaded({
+    $timer.Start()
+    try {
+      $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($win)).Handle
+      # MOD_CONTROL(0x2) + MOD_ALT(0x1) = 0x3, VK_Q = 0x51
+      if ([Win32.Native]::RegisterHotKey($hwnd, $script:hotkeyId, 0x3, 0x51)) {
+        $script:hotkeyRegistered = $true
+        $source = [System.Windows.Interop.HwndSource]::FromHwnd($hwnd)
+        if ($null -ne $source) {
+          $source.AddHook({
+            param($hwnd, $msg, $wParam, $lParam, [ref]$handled)
+            if ($msg -eq 0x312 -and $wParam -eq $script:hotkeyId) {  # WM_HOTKEY
+              $handled.Value = $true
+              $win.Close()
+            }
+            return [IntPtr]::Zero
+          })
+        }
+      }
+    } catch {
+      # Hotkey registration can fail if another app grabbed Ctrl+Alt+Q; the
+      # panel button and the × button still close the overlay.
+    }
+  })
+$win.Add_Closed({
+    $timer.Stop()
+    if ($PidFile -ne '') {
+      try { [System.IO.File]::Delete($PidFile) } catch { }
+    }
+    if ($script:hotkeyRegistered) {
+      try {
+        $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($win)).Handle
+        [Win32.Native]::UnregisterHotKey($hwnd, $script:hotkeyId) | Out-Null
+      } catch { }
+    }
+  })
 
 Update-Card
 [void]$win.ShowDialog()

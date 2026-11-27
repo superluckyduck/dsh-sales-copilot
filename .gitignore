@@ -1,0 +1,10 @@
+# Only the vendored live-captions package is tracked under node_modules; it has
+# to live there so DSH resolves the bare specifier `dsh-live-captions` and can
+# find that package's browser panel.
+node_modules/*
+!node_modules/dsh-live-captions/
+
+# Runtime artefacts.
+**/*.log
+**/*.wav
+**/*.pid

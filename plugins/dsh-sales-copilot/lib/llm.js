@@ -47,8 +47,7 @@ export function createLlm(ctx, log) {
     const abort = () => controller.abort()
     if (signal) signal.addEventListener('abort', abort, { once: true })
 
-    let text = ''
-    try {
+    async function runStream(withReasoningOff) {
       const stream = llm.stream({
         provider: picked.provider,
         model: picked.model,
@@ -56,15 +55,33 @@ export function createLlm(ctx, log) {
         messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
         temperature,
         maxTokens,
+        // These are short one-shot lines (roleplay / FAQ JSON). Thinking is
+        // both unnecessary and harmful here: some providers stream the
+        // reasoning as text, which then leaks into the spoken customer line.
+        ...(withReasoningOff ? { reasoningEffort: 'off' } : {}),
         signal: controller.signal,
       })
+      let result = ''
       for await (const chunk of stream) {
         if (chunk === null || typeof chunk !== 'object') continue
         if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
-          text += chunk.text
+          result += chunk.text
         } else if (chunk.type === 'finish' && chunk.reason?.kind === 'error') {
           throw new Error(chunk.reason.failure?.message ?? '模型返回错误')
         }
+      }
+      return result
+    }
+
+    let text = ''
+    try {
+      try {
+        text = await runStream(true)
+      } catch (error) {
+        // A few providers do not expose a reasoning-effort control at all.
+        // Retry once without it rather than failing the whole turn.
+        if (String(error?.message ?? '').includes('reasoning effort')) text = await runStream(false)
+        else throw error
       }
     } catch (error) {
       if (controller.signal.aborted) throw new Error('模型调用超时或已取消')

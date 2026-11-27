@@ -268,20 +268,29 @@ window.__ModuleLoader__.load({
     /* ---------------------------------------------------------------- */
 
     async function api(path, init) {
-      const response = await fetch(API + path, {
-        headers: { 'content-type': 'application/json' },
-        ...init,
-      })
-      let payload = null
-      try {
-        payload = await response.json()
-      } catch {
-        throw new Error(`服务端返回了非 JSON 响应（HTTP ${response.status}）`)
+      const method = String(init?.method ?? 'GET').toUpperCase()
+      for (let attempt = 0; ; attempt += 1) {
+        const response = await fetch(API + path, {
+          headers: { 'content-type': 'application/json' },
+          ...init,
+        })
+        let payload = null
+        try {
+          payload = await response.json()
+        } catch {
+          // While the plugin reloads, the host answers with its own bodyless
+          // 404/405 instead of ours. Reads are safe, so retry them once.
+          if (method === 'GET' && attempt === 0 && [404, 405, 503].includes(response.status)) {
+            await new Promise((resolve) => setTimeout(resolve, 300))
+            continue
+          }
+          throw new Error(`服务端返回了非 JSON 响应（HTTP ${response.status}，${path}）`)
+        }
+        if (payload === null || payload.ok !== true) {
+          throw new Error(payload?.error ?? `请求失败（HTTP ${response.status}）`)
+        }
+        return payload
       }
-      if (payload === null || payload.ok !== true) {
-        throw new Error(payload?.error ?? `请求失败（HTTP ${response.status}）`)
-      }
-      return payload
     }
 
     function confidenceColor(confidence) {
@@ -454,7 +463,7 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setError('')
         try {
-          const data = await api('/qa/search', { method: 'POST', body: JSON.stringify({ query: text, limit: 6 }) })
+          const data = await api('/qa/search', { method: 'POST', body: JSON.stringify({ query: text, limit: 3 }) })
           if (seq.current !== id) return
           setMatches(data.matches ?? [])
           setMeta({ tookMs: data.tookMs ?? 0 })
@@ -956,7 +965,7 @@ window.__ModuleLoader__.load({
         width: 8,
         height: 8,
         borderRadius: 999,
-        background: on ? C.success : C.borderStrong,
+        background: on ? C.success : C.border,
         boxShadow: on ? '0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-success-primary,#30a46c) 18%, transparent)' : 'none',
         flexShrink: 0,
       }),
@@ -991,13 +1000,19 @@ window.__ModuleLoader__.load({
       const [overlay, setOverlay] = useState(null)
       const [error, setError] = useState('')
       const [busy, setBusy] = useState('')
+      const actAt = useRef(0)
 
       useEffect(() => {
         let alive = true
         const load = async () => {
+          // A just-issued action must not be overwritten by an in-flight GET
+          // that started earlier and finishes later (stale overlay state made
+          // the 「收起浮层」 button look like it did nothing).
+          if (Date.now() - actAt.current < 1500) return
           try {
             const payload = await api('/rt/state', { method: 'GET' })
             if (!alive) return
+            if (Date.now() - actAt.current < 1500) return
             setRt(payload.rt)
             setOverlay(payload.overlay ?? null)
             setError('')
@@ -1014,9 +1029,11 @@ window.__ModuleLoader__.load({
       }, [])
 
       const act = async (path, body) => {
+        actAt.current = Date.now()
         setBusy(path)
         try {
           const payload = await api(path, { method: 'POST', body: JSON.stringify(body ?? {}) })
+          actAt.current = Date.now()
           if (payload.rt) setRt(payload.rt)
           if (payload.overlay) setOverlay(payload.overlay)
           setError('')
@@ -1088,7 +1105,7 @@ window.__ModuleLoader__.load({
               title:
                 overlay?.supported === false
                   ? '当前系统不支持系统置顶窗口'
-                  : '开一个始终置顶的小卡片，Zoom/Teams/微信挡住 DSH 时也能看答案',
+                  : '开一个始终置顶的小卡片，Zoom/Teams/微信挡住 DSH 时也能看答案。锁定后鼠标穿透，按 Ctrl+Alt+Q 或点这里「收起浮层」关闭',
               onClick: () => act(overlay?.open ? '/overlay/close' : '/overlay/open'),
             },
             overlay?.open ? '收起浮层' : '置顶浮层',
@@ -1103,6 +1120,11 @@ window.__ModuleLoader__.load({
               ? '听系统声音和麦克风（依赖 dsh-live-captions）。每说完一句，这里出现一张卡片：客户原话 → 中文要点 → 照着念的英文。'
               : '点「开始听」后，把客户的声音放出来（会议 / 通话 / 现场），这里会逐句出卡片。',
         ),
+        rt?.lastAiError
+          ? h('div', { style: { ...LIVE.hint, color: C.danger, marginTop: 6 } }, `AI 精确回答出错：${rt.lastAiError}`)
+          : rt?.aiAssist && rt?.model?.available === false
+            ? h('div', { style: { ...LIVE.hint, color: C.warn, marginTop: 6 } }, 'DSH 里还没有选好模型：先在对话里选一个模型，「AI 精确回答」才会生效。')
+            : null,
         error !== '' ? h('div', { style: { ...LIVE.hint, color: C.danger, marginTop: 6 } }, error) : null,
         overlay?.failure
           ? h('div', { style: { ...LIVE.hint, color: C.danger, marginTop: 6 } }, `浮层：${overlay.failure}`)
@@ -1160,7 +1182,11 @@ window.__ModuleLoader__.load({
                     )
                   : item.aiState === 'pending'
                     ? h('div', { style: { ...LIVE.hint, marginTop: 8 } }, 'AI 正在想…')
-                    : null,
+                    : item.aiState === 'unavailable'
+                      ? h('div', { style: { ...LIVE.hint, marginTop: 8, color: C.warn } }, '没有可用的 DSH 模型，AI 精确回答已跳过')
+                      : item.aiState === 'error'
+                        ? h('div', { style: { ...LIVE.hint, marginTop: 8, color: C.danger } }, 'AI 精确回答失败，见上方提示')
+                        : null,
               ),
             ),
       )
@@ -1245,6 +1271,23 @@ window.__ModuleLoader__.load({
       const [autoSpeak, setAutoSpeak] = useState(true)
       const [speakBusy, setSpeakBusy] = useState(false)
       const [voiceBusy, setVoiceBusy] = useState(false)
+      const [voiceRoom, setVoiceRoom] = useState(null)
+      const [voiceLang, setVoiceLang] = useState('auto')
+
+      const refreshVoiceRoom = async () => {
+        try {
+          const payload = await api('/voice-room/state', { method: 'GET' })
+          setVoiceRoom(payload.voice)
+        } catch {
+          // Voice state is advisory; the room itself keeps working.
+        }
+      }
+
+      useEffect(() => {
+        void refreshVoiceRoom()
+        const id = setInterval(() => void refreshVoiceRoom(), 1000)
+        return () => clearInterval(id)
+      }, [])
 
       const loadLists = async () => {
         try {
@@ -1298,9 +1341,24 @@ window.__ModuleLoader__.load({
 
       const openMeeting = (id) =>
         run('open', async () => {
-          const payload = await api(`/meeting?id=${encodeURIComponent(id)}`, { method: 'GET' })
-          setMeeting(payload.meeting)
+          try {
+            const payload = await api(`/meeting?id=${encodeURIComponent(id)}`, { method: 'GET' })
+            setMeeting(payload.meeting)
+          } catch (failure) {
+            // Stale row: the meeting was already deleted. Refresh so it goes away.
+            await loadLists()
+            throw failure
+          }
         })
+
+      const removeMeeting = (id, meetingTitle) => {
+        if (!window.confirm(`删除对练「${meetingTitle}」？对话和总结会一起删除，不能恢复。`)) return
+        return run('delete-meeting', async () => {
+          await api('/meeting/delete', { method: 'POST', body: JSON.stringify({ id }) })
+          setMeeting((current) => (current?.id === id ? null : current))
+          await loadLists()
+        })
+      }
 
       const send = () =>
         run('send', async () => {
@@ -1314,12 +1372,15 @@ window.__ModuleLoader__.load({
           setDraft('')
         })
 
-      const speakText = async (text) => {
+      const speakText = async (text, lang) => {
         const line = String(text ?? '').trim()
         if (line === '') return
+        const voiceLang = lang === 'en' || lang === 'zh'
+          ? lang
+          : /[\u3400-\u9fff\uf900-\ufaff]/.test(line) ? 'zh' : 'en'
         setSpeakBusy(true)
         try {
-          await api('/tts/speak', { method: 'POST', body: JSON.stringify({ text: line.slice(0, 600) }) })
+          await api('/tts/speak', { method: 'POST', body: JSON.stringify({ text: line.slice(0, 600), lang: voiceLang }) })
           setError('')
         } catch (failure) {
           setError(failure?.message ?? String(failure))
@@ -1332,7 +1393,7 @@ window.__ModuleLoader__.load({
         if (meeting === null) return
         setVoiceBusy(true)
         try {
-          const payload = await api('/meeting/voice-turn', { method: 'POST', body: JSON.stringify({ id: meeting.id }) })
+          const payload = await api('/meeting/voice-turn', { method: 'POST', body: JSON.stringify({ id: meeting.id, language: voiceLang }) })
           setMeeting(payload.meeting)
           setError('')
         } catch (failure) {
@@ -1341,6 +1402,33 @@ window.__ModuleLoader__.load({
           setVoiceBusy(false)
         }
       }
+
+      const voiceRoomStart = () =>
+        run('voice-start', async () => {
+          if (meeting === null) return
+          const payload = await api('/voice-room/start', {
+            method: 'POST',
+            body: JSON.stringify({ id: meeting.id, language: voiceLang }),
+          })
+          if (payload.ok === false) {
+            setError(payload.error ?? '无法开始语音对练')
+            return
+          }
+          setMeeting(payload.meeting)
+          setVoiceRoom(payload.voice)
+          setError('')
+        })
+
+      const voiceRoomStop = () =>
+        run('voice-stop', async () => {
+          const payload = await api('/voice-room/stop', {
+            method: 'POST',
+            body: JSON.stringify({ id: meeting?.id ?? '' }),
+          })
+          if (payload.meeting) setMeeting(payload.meeting)
+          setVoiceRoom(payload.voice)
+          setError('')
+        })
 
       const loadSessions = () =>
         run('sessions', async () => {
@@ -1392,7 +1480,7 @@ window.__ModuleLoader__.load({
             { style: ROOM.row },
             h('button', { type: 'button', style: s.btn, onClick: () => setMeeting(null) }, '← 返回列表'),
             h('strong', { style: { fontSize: 13.5 } }, meeting.title),
-            h('span', { style: LIVE.hint }, meeting.mode === 'ai-customer' ? 'AI 扮演客户' : meeting.mode === 'call-import' ? '通话记录' : '你扮演客户'),
+            h('span', { style: LIVE.hint }, meeting.mode === 'ai-customer' ? 'AI 扮演客户 · 你演销售' : meeting.mode === 'call-import' ? '通话记录' : '你扮演客户 · AI 演销售'),
             h('span', { style: { flex: 1 } }),
             h(
               'button',
@@ -1400,39 +1488,111 @@ window.__ModuleLoader__.load({
                 type: 'button',
                 style: s.btn,
                 disabled: speakBusy,
-                title: '用这台电脑的语音把客户最后一句话念出来，方便跟读',
+                title: '用这台电脑的语音把 AI 最后一句话念出来，方便跟读',
                 onClick: () => {
-                  const lastCustomer = [...messages].reverse().find((item) => item.speaker === 'customer')
-                  void speakText(lastCustomer?.text ?? '')
+                  const aiSpeaker = meeting.mode === 'user-customer' ? 'sales' : 'customer'
+                  const lastAi = [...messages].reverse().find((item) => item.speaker === aiSpeaker)
+                  void speakText(lastAi?.text ?? '')
                 },
               },
-              speakBusy ? '朗读中…' : '朗读客户台词',
+              speakBusy ? '朗读中…' : '朗读 AI 台词',
             ),
             h(
               'button',
               { type: 'button', style: autoSpeak ? s.btnPrimary : s.btn, onClick: () => setAutoSpeak((value) => !value) },
               autoSpeak ? '自动朗读：开' : '自动朗读：关',
             ),
-            h('button', { type: 'button', style: s.btnPrimary, disabled: busy !== '', onClick: turn }, busy === 'turn' ? '客户想说…' : '客户接着说'),
-            h(
-              'button',
-              { type: 'button', style: s.btn, disabled: voiceBusy || busy !== '', title: '用麦克风说一句英文，识别后作为你的回答', onClick: voiceTurn },
-              voiceBusy ? '听你说…' : '语音回答',
-            ),
+            h('button', {
+              type: 'button',
+              style: s.btnPrimary,
+              disabled: busy !== '',
+              onClick: turn,
+              title: meeting.mode === 'ai-customer' ? '让 AI 扮演的客户再说一句' : '让 AI 扮演的销售回应你（客户）刚才那句',
+            }, busy === 'turn' ? (meeting.mode === 'ai-customer' ? '客户想说…' : '销售想说…') : (meeting.mode === 'ai-customer' ? '客户接着说' : '销售接着说')),
             h('button', { type: 'button', style: s.btn, disabled: busy !== '', onClick: summarize }, busy === 'summary' ? '总结中…' : '总结并写入画像'),
+            h('button', { type: 'button', style: s.btnDanger, disabled: busy !== '', onClick: () => removeMeeting(meeting.id, meeting.title) }, busy === 'delete-meeting' ? '删除中…' : '删除这场对练'),
+          ),
+          h(
+            'div',
+            { style: { ...ROOM.section, marginBottom: 12, borderColor: voiceRoom?.running ? C.accent : C.border } },
+            h(
+              'div',
+              { style: ROOM.row },
+              h('span', { style: LIVE.dot(voiceRoom?.running === true) }),
+              h('strong', { style: { fontSize: 13 } }, voiceRoom?.running ? '语音实时对练中' : '语音实时对练'),
+              h('span', { style: LIVE.hint }, voiceRoom?.running
+                ? `对话 ${voiceRoom.turns ?? 0} 轮 · ${voiceRoom.speaker === 'customer' ? '你说客户，AI 演销售' : '你说销售，AI 演客户'}`
+                : '开着麦克风连续对话：你说完一句，AI 自动回应并朗读，不用手打'),
+              h('span', { style: { flex: 1 } }),
+              voiceRoom?.running
+                ? h('button', {
+                    type: 'button',
+                    style: s.btnDanger,
+                    disabled: busy !== '',
+                    onClick: voiceRoomStop,
+                  }, '结束语音对练')
+                : h('button', {
+                    type: 'button',
+                    style: s.btnPrimary,
+                    disabled: busy !== '' || meeting.mode === 'call-import',
+                    title: meeting.mode === 'call-import' ? '通话记录模式的对练不支持语音实时对话' : '占用麦克风开始连续语音对话；请先停止「实时」辅助',
+                    onClick: voiceRoomStart,
+                  }, busy === 'voice-start' ? '开启中…' : '开始语音对练'),
+              !voiceRoom?.running
+                ? h('button', {
+                    type: 'button',
+                    style: s.btn,
+                    disabled: voiceBusy || busy !== '' || voiceRoom?.running,
+                    title: '说一句话，识别后作为你这一侧的发言（单次，非连续）',
+                    onClick: voiceTurn,
+                  }, voiceBusy ? '听你说…' : '说一句')
+                : null,
+            ),
+            voiceRoom?.running
+              ? h('div', { style: { marginTop: 8, fontSize: 12.5, lineHeight: '19px', color: C.muted } },
+                  h('div', null, `你刚说：${voiceRoom.heard || '（等待中…）'}`),
+                  h('div', null, `AI 回应：${voiceRoom.reply || '（思考中…）'}`),
+                  voiceRoom.error ? h('div', { style: { color: C.danger, marginTop: 4 } }, `⚠ ${voiceRoom.error}`) : null,
+                )
+              : h('div', { style: { marginTop: 8, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+                  h('span', { style: { fontSize: 12, color: C.muted } }, '识别语言'),
+                  h('select', {
+                    style: { ...ROOM.input, width: 'auto', flex: '0 0 auto', padding: '4px 8px', fontSize: 12 },
+                    value: voiceLang,
+                    disabled: voiceRoom?.running,
+                    onChange: (event) => setVoiceLang(event.target.value),
+                  },
+                    h('option', { value: 'auto' }, '自动（按模式）'),
+                    h('option', { value: 'zh' }, '中文'),
+                    h('option', { value: 'en' }, 'English'),
+                  ),
+                  h('span', { style: { fontSize: 11.5, color: C.muted } }, `朗读引擎：${voiceRoom?.tts?.engine === 'xiaomi' ? '小米 MiMo（冰糖/Mia）' : voiceRoom?.tts?.engine === 'edge-tts' ? 'Edge 神经语音' : '系统语音'}`),
+                ),
           ),
           h(
             'div',
             { style: ROOM.msgs },
-            messages.length === 0 ? h('div', { style: LIVE.empty }, '还没有对话，先说一句，或者点「客户接着说」') : null,
-            messages.map((message) =>
-              h(
+            messages.length === 0
+              ? h('div', { style: LIVE.empty }, '还没有对话，先说一句，或者点「接着说」开始')
+              : null,
+            messages.map((message) => {
+              const aiSide = meeting.mode === 'user-customer' ? 'sales' : 'customer'
+              const isAi = message.speaker === aiSide
+              let label
+              if (message.speaker === 'sales') {
+                label = meeting.mode === 'user-customer' && isAi ? 'AI 销售' : '我（销售）'
+              } else if (message.speaker === 'customer') {
+                label = isAi ? `AI 客户${message.name ? ` · ${message.name}` : ''}` : '我（客户）'
+              } else {
+                label = message.name || '备注'
+              }
+              return h(
                 'div',
                 { key: message.id, style: ROOM.msg(message.speaker) },
-                h('div', { style: ROOM.msgName }, `${message.speaker === 'sales' ? '我（销售）' : message.name || '客户'} · ${String(message.at).slice(11, 16)}`),
+                h('div', { style: ROOM.msgName }, `${label} · ${String(message.at).slice(11, 16)}`),
                 message.text,
-              ),
-            ),
+              )
+            }),
           ),
           summary
             ? h(
@@ -1536,8 +1696,8 @@ window.__ModuleLoader__.load({
                 value: mode,
                 onChange: (event) => setMode(event.target.value),
               },
-              h('option', { value: 'ai-customer' }, 'AI 扮演客户'),
-              h('option', { value: 'user-customer' }, '我扮演客户'),
+              h('option', { value: 'ai-customer' }, 'AI 扮客户 · 你练销售'),
+              h('option', { value: 'user-customer' }, '你扮客户 · AI 练销售'),
             ),
             h(
               'select',
@@ -1551,7 +1711,7 @@ window.__ModuleLoader__.load({
             ),
             h('button', { type: 'button', style: s.btnPrimary, disabled: busy !== '', onClick: createMeeting }, busy === 'create' ? '创建中…' : '开始'),
           ),
-          h('div', { style: LIVE.hint }, '对练结束后点「总结并写入画像」，客户的需求、预算、阶段会自动补进客户档案。'),
+          h('div', { style: LIVE.hint }, '两种模式都支持打字和语音：AI 扮客户时你练销售话术；你扮客户时 AI 销售会真实回应你。对练结束后点「总结并写入画像」。'),
         ),
         h(
           'div',
@@ -1594,8 +1754,9 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { key: item.id, style: { ...ROOM.row, marginBottom: 4 } },
-                  h('span', { style: { flex: 1, fontSize: 13.5 } }, `${item.title}（${item.messages} 句${item.summarized ? ' · 已总结' : ''}）`),
-                  h('button', { type: 'button', style: s.btn, onClick: () => openMeeting(item.id) }, '打开'),
+                  h('span', { style: { flex: 1, fontSize: 13.5 } }, `${item.title}（${item.messages} 句${item.summarized ? ' · 已总结' : ''} · ${item.mode === 'ai-customer' ? 'AI 演客户' : item.mode === 'call-import' ? '通话记录' : 'AI 演销售'}）`),
+                  h('button', { type: 'button', style: s.btn, disabled: busy !== '', onClick: () => openMeeting(item.id) }, '打开'),
+                  h('button', { type: 'button', style: s.btnDanger, disabled: busy !== '', onClick: () => removeMeeting(item.id, item.title) }, '删除'),
                 ),
               ),
         ),

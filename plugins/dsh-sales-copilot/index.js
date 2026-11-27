@@ -21,6 +21,10 @@ import { createRealtime } from './lib/realtime.js'
 import { createMeeting } from './lib/meeting.js'
 import { createOverlay } from './lib/overlay.js'
 import { createTts } from './lib/tts.js'
+import { createEdgeTts } from './lib/edge-tts.js'
+import { createXiaomiTts } from './lib/xiaomi-tts.js'
+import { playAudio } from './lib/audio-player.js'
+import { createVoiceRoom } from './lib/voice-room.js'
 import { createTranslateFree } from './lib/translate-free.js'
 
 const PREFIX = '/sales-copilot/api'
@@ -936,7 +940,61 @@ async function readJson(request) {
   }
 }
 
-export function registerApi({ ctx, store, log, realtime, meetingRunner, llm, overlay, tts }) {
+/** The host's own base URL, used to reach the live-captions plugin. */
+function hostOrigin(ctx) {
+  try {
+    const webServer = ctx.get('webServer')
+    const value = typeof webServer?.getOrigin === 'function' ? webServer.getOrigin() : null
+    return typeof value === 'string' && value !== '' ? value.replace(/\/$/, '') : null
+  } catch {
+    return null
+  }
+}
+
+function captionsBase(origin) {
+  return origin === null ? null : `${origin}/live-captions/api`
+}
+
+async function captionsGetWithOrigin(origin, path) {
+  const base = captionsBase(origin)
+  if (base === null) throw new Error('Web 服务尚未就绪')
+  const response = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(8000) })
+  const text = await response.text()
+  let payload = null
+  try {
+    payload = JSON.parse(text)
+  } catch {
+    throw new Error(`live-captions 返回了非 JSON 响应（HTTP ${response.status}）`)
+  }
+  if (!response.ok || payload?.ok === false) {
+    throw new Error(payload?.error ?? `live-captions 返回 HTTP ${response.status}`)
+  }
+  return payload
+}
+
+async function captionsPostWithOrigin(origin, body) {
+  const base = captionsBase(origin)
+  if (base === null) throw new Error('Web 服务尚未就绪')
+  const response = await fetch(`${base}/command`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15000),
+  })
+  const text = await response.text()
+  let payload = null
+  try {
+    payload = JSON.parse(text)
+  } catch {
+    throw new Error(`live-captions 返回了非 JSON 响应（HTTP ${response.status}）`)
+  }
+  if (!response.ok || payload?.ok === false) {
+    throw new Error(payload?.error ?? `live-captions 返回 HTTP ${response.status}`)
+  }
+  return payload
+}
+
+export function registerApi({ ctx, store, log, realtime, meetingRunner, llm, overlay, tts, voiceRoom }) {
   const webServer = ctx.get('webServer')
   if (webServer === undefined) {
     log('api: web server unavailable, the panel will not be able to reach the host')
@@ -944,58 +1002,10 @@ export function registerApi({ ctx, store, log, realtime, meetingRunner, llm, ove
   }
 
   /** The host's own base URL, used to reach the live-captions plugin. */
-  const selfOrigin = () => {
-    try {
-      const value = webServer.getOrigin()
-      return typeof value === 'string' && value !== '' ? value : null
-    } catch {
-      return null
-    }
-  }
+  const selfOrigin = () => hostOrigin(ctx)
 
-  const captionsBase = () => {
-    const origin = selfOrigin()
-    return origin === null ? null : `${origin}/live-captions/api`
-  }
-
-  async function captionsGet(path) {
-    const base = captionsBase()
-    if (base === null) throw new Error('Web 服务尚未就绪')
-    const response = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(8000) })
-    const text = await response.text()
-    let payload = null
-    try {
-      payload = JSON.parse(text)
-    } catch {
-      throw new Error(`live-captions 返回了非 JSON 响应（HTTP ${response.status}）`)
-    }
-    if (!response.ok || payload?.ok === false) {
-      throw new Error(payload?.error ?? `live-captions 返回 HTTP ${response.status}`)
-    }
-    return payload
-  }
-
-  async function captionsPost(body) {
-    const base = captionsBase()
-    if (base === null) throw new Error('Web 服务尚未就绪')
-    const response = await fetch(`${base}/command`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(15000),
-    })
-    const text = await response.text()
-    let payload = null
-    try {
-      payload = JSON.parse(text)
-    } catch {
-      throw new Error(`live-captions 返回了非 JSON 响应（HTTP ${response.status}）`)
-    }
-    if (!response.ok || payload?.ok === false) {
-      throw new Error(payload?.error ?? `live-captions 返回 HTTP ${response.status}`)
-    }
-    return payload
-  }
+  const captionsGet = (path) => captionsGetWithOrigin(selfOrigin(), path)
+  const captionsPost = (body) => captionsPostWithOrigin(selfOrigin(), body)
 
   const handler = async (request, response) => {
     try {
@@ -1044,6 +1054,11 @@ export function registerApi({ ctx, store, log, realtime, meetingRunner, llm, ove
 
       if (request.method === 'GET' && route === '/overlay/state') {
         json(response, 200, { ok: true, overlay: overlay.state() })
+        return
+      }
+
+      if (request.method === 'GET' && route === '/voice-room/state') {
+        json(response, 200, { ok: true, voice: voiceRoom.state() })
         return
       }
 
@@ -1221,13 +1236,20 @@ export function registerApi({ ctx, store, log, realtime, meetingRunner, llm, ove
               json(response, 404, { ok: false, error: '对练不存在' })
               return
             }
-            const turn = await meetingRunner.customerTurn({
-              meeting,
-              roleId: String(body.roleId ?? ''),
-              instruction: String(body.instruction ?? ''),
+            const speaker = meeting.mode === 'user-customer' ? 'sales' : 'customer'
+            const turn = speaker === 'sales'
+              ? await meetingRunner.salesTurn({ meeting, instruction: String(body.instruction ?? ''), language: String(body.language ?? 'auto') })
+              : await meetingRunner.customerTurn({
+                  meeting,
+                  roleId: String(body.roleId ?? ''),
+                  instruction: String(body.instruction ?? ''),
+                })
+            const result = store.addMessage(meeting.id, {
+              speaker,
+              text: turn.text,
+              name: speaker === 'sales' ? 'AI 销售' : turn.role.name,
             })
-            const result = store.addMessage(meeting.id, { speaker: 'customer', text: turn.text, name: turn.role.name })
-            json(response, 200, { ok: true, role: turn.role, fallback: turn.fallback === true, meeting: result.meeting, message: result.message })
+            json(response, 200, { ok: true, speaker, role: turn.role ?? null, fallback: turn.fallback === true, meeting: result.meeting, message: result.message })
             return
           }
           case '/meeting/summary': {
@@ -1308,6 +1330,26 @@ export function registerApi({ ctx, store, log, realtime, meetingRunner, llm, ove
             json(response, 200, { ok: true, sessionId, imported: rows.length, meeting, summary, customer })
             return
           }
+          /* hands-free voice conversation ---------------------------- */
+          case '/voice-room/start': {
+            const meeting = store.getMeeting(String(body.id ?? ''))
+            if (meeting === null) {
+              json(response, 404, { ok: false, error: '对练不存在' })
+              return
+            }
+            const started = await voiceRoom.start({
+              meeting,
+              durationMs: body.durationMs,
+              language: String(body.language ?? 'auto'),
+            })
+            json(response, started.ok ? 200 : 409, { ...started, voice: voiceRoom.state(), meeting: store.getMeeting(meeting.id) })
+            return
+          }
+          case '/voice-room/stop': {
+            const stopped = await voiceRoom.stop()
+            json(response, 200, { ok: true, ...stopped, voice: voiceRoom.state(), meeting: store.getMeeting(String(body.id ?? '')) ?? null })
+            return
+          }
           /* speak an answer out loud ------------------------------ */
           case '/meeting/voice-turn': {
             const meeting = store.getMeeting(String(body.id ?? ''))
@@ -1330,13 +1372,16 @@ export function registerApi({ ctx, store, log, realtime, meetingRunner, llm, ove
             const previous = {
               source: live?.settings?.source ?? 'speaker',
               sourceLanguage: live?.settings?.sourceLanguage ?? 'auto',
+              translate: live?.settings?.translate ?? true,
             }
+            const lang = String(body.language ?? 'auto')
+            const pinnedLang = lang === 'en' || lang === 'zh' ? lang : (meeting.mode === 'user-customer' ? 'zh' : 'en')
             const budget = Math.min(Math.max(Number(body.timeoutMs ?? 20000), 6000), 60000)
             const deadline = Date.now() + budget
             let heard = null
             let translation = ''
             try {
-              await captionsPost({ action: 'settings', settings: { source: 'mic', sourceLanguage: 'auto' } })
+              await captionsPost({ action: 'settings', settings: { source: 'mic', sourceLanguage: pinnedLang, translate: false } })
               await captionsPost({ action: 'start' })
               while (Date.now() < deadline) {
                 await new Promise((resolve) => setTimeout(resolve, 700))
@@ -1373,12 +1418,21 @@ export function registerApi({ ctx, store, log, realtime, meetingRunner, llm, ove
               json(response, 200, { ok: false, error: `没听清（${Math.round(budget / 1000)} 秒内没有说出完整的句子）` })
               return
             }
-            const result = store.addMessage(meeting.id, { speaker: 'sales', text: heard, name: '我（语音）' })
-            json(response, 200, { ok: true, heard, translation, meeting: result.meeting, message: result.message })
+            const speaker = meeting.mode === 'user-customer' ? 'customer' : 'sales'
+            const result = store.addMessage(meeting.id, {
+              speaker,
+              text: heard,
+              name: speaker === 'customer' ? '我（语音·客户）' : '我（语音·销售）',
+            })
+            json(response, 200, { ok: true, heard, translation, speaker, meeting: result.meeting, message: result.message })
             return
           }
           case '/meeting/delete': {
-            json(response, 200, { ok: true, deleted: store.deleteMeeting(String(body.id ?? '')) })
+            const removedId = String(body.id ?? '')
+            // Deleting the meeting that is being roleplayed must also release
+            // the microphone, otherwise the voice room keeps capturing.
+            if (voiceRoom?.state().meetingId === removedId) await voiceRoom.stop()
+            json(response, 200, { ok: true, deleted: store.deleteMeeting(removedId) })
             return
           }
           default:
@@ -1562,12 +1616,59 @@ export function apply(ctx, config) {
   }
   const realtime = createRealtime({ store, llm, log, getOrigin })
   const overlay = createOverlay({ root: pluginRoot, log, getOrigin })
-  const tts = createTts({ root: pluginRoot, log })
+  const sapiTts = createTts({ root: pluginRoot, log })
+  const edgeTts = createEdgeTts({ log })
+  const xiaomiTts = createXiaomiTts({ log })
+  // Voice priority: Xiaomi MiMo (neural, configured via tts-config.json) →
+  // edge-tts (free neural) → Windows SAPI (offline). Speech is serialised so
+  // two replies arriving together never call stop() on each other.
+  let speakTail = Promise.resolve()
+  const tts = {
+    supported: xiaomiTts.supported || edgeTts.supported || sapiTts.supported,
+    voices: async () => {
+      if (xiaomiTts.supported) return xiaomiTts.voices()
+      try { return await edgeTts.voices() } catch { return sapiTts.voices() }
+    },
+    speak: (options) => {
+      const job = speakTail.then(async () => {
+        if (xiaomiTts.supported) {
+          try {
+            const result = await xiaomiTts.speak(options)
+            await playAudio(result.wav, { ext: 'wav', timeoutMs: Math.max(20000, result.wav.length / 20) })
+            return { voice: result.voice, ms: result.ms, engine: 'xiaomi' }
+          } catch (failure) {
+            log(`xiaomi-tts failed, falling back: ${failure?.message ?? failure}`)
+          }
+        }
+        if (edgeTts.supported) {
+          try { return await edgeTts.speak(options) } catch (failure) {
+            log(`edge-tts failed, falling back to SAPI: ${failure?.message ?? failure}`)
+          }
+        }
+        return sapiTts.speak(options)
+      })
+      speakTail = job.catch(() => {})
+      return job
+    },
+    stop: () => { xiaomiTts.stop(); edgeTts.stop(); sapiTts.stop(); return true },
+    state: () => ({ ...xiaomiTts.state(), edge: edgeTts.state(), fallback: sapiTts.state() }),
+  }
+  const voiceRoom = createVoiceRoom({
+    store,
+    meetingRunner,
+    llm,
+    tts,
+    log,
+    captionsGet: (path) => captionsGetWithOrigin(hostOrigin(ctx), path),
+    captionsPost: (body) => captionsPostWithOrigin(hostOrigin(ctx), body),
+    speakText: (text, lang) => tts.speak({ text, lang }),
+  })
   const translateFree = createTranslateFree({ root: pluginRoot, log })
   log(`plugin activated, dataRoot=${dataRoot}, qa=${store.data.qa.length}, customers=${store.data.customers.length}`)
 
   ctx.effect(() => () => {
     void realtime.stop()
+    void voiceRoom.stop()
     overlay.dispose()
     tts.stop()
     translateFree.stop()
@@ -1576,32 +1677,50 @@ export function apply(ctx, config) {
   }, 'sales-copilot: store')
 
   ctx.inject(['webServer'], (scoped) => {
-    const dispose = registerApi({ ctx: scoped, store, log, realtime, meetingRunner, llm, overlay, tts })
+    const dispose = registerApi({ ctx: scoped, store, log, realtime, meetingRunner, llm, overlay, tts, voiceRoom })
     scoped.effect(() => dispose, 'sales-copilot: api')
     void (async () => {
       await translateFree.start()
+      // Never overwrite a choice the user made in the caption panel. Only seed
+      // the free bridge the very first time, i.e. when live-captions has no
+      // saved settings.json yet.
+      const settingsFile = join(process.env.DSH_HOME?.trim() || join(homedir(), '.dsh'), 'live-captions', 'settings.json')
+      if (existsSync(settingsFile)) {
+        log('translate-free: keeping existing caption settings')
+        return
+      }
       const origin = getOrigin()
       if (!origin) return
-      try {
-        const response = await fetch(`${origin}/live-captions/api/command`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            action: 'settings',
-            settings: {
-              translate: true,
-              translateEngine: 'local',
-              localBaseUrl: 'http://127.0.0.1:8787/v1',
-              localModel: 'free-google-microsoft',
-              targetLanguage: 'zh',
-            },
-          }),
-          signal: AbortSignal.timeout(5000),
-        })
-        if (response.ok) log('translate-free: live captions configured for local free translation')
-      } catch (error) {
-        log(`translate-free: live captions not configured (${error?.message ?? error})`)
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        try {
+          const response = await fetch(`${origin}/live-captions/api/command`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              action: 'settings',
+              settings: {
+                source: 'both',
+                translate: true,
+                translateEngine: 'local',
+                localBaseUrl: 'http://127.0.0.1:8787/v1',
+                localModel: 'free-google-microsoft',
+                targetLanguage: 'zh',
+                lyricShowSource: true,
+                lyricVisible: true,
+              },
+            }),
+            signal: AbortSignal.timeout(5000),
+          })
+          if (response.ok) {
+            log('translate-free: live captions seeded with the free bridge')
+            return
+          }
+        } catch {
+          // Plugin not listening yet.
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1200))
       }
+      log('translate-free: live captions not configured after retries')
     })()
   })
 

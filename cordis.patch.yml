@@ -1,4 +1,54 @@
-# Installable root bundle for dsh-sales-copilot.
+# Single-install bundle for dsh-sales-copilot.
+#
+# Installing this bundle activates the sales panel, the live-caption engine and
+# its speech recognition, so no second bundle install is required.
+#
+# The live-captions package lives in ./node_modules/dsh-live-captions (the
+# published 1.1.1 package, both halves). It is addressed by its package name so
+# DSH also discovers its browser panel: the caption capsule, the audio-source
+# switch (system sound / microphone / both), the source- and target-language
+# pickers, the translation-engine choice (cloud provider·model, bundled offline
+# model, or a local OpenAI-compatible service) and the always-on-top overlay.
+#
+# Every value below is a first-run default only. What you pick in the caption
+# panel is saved to ~/.dsh/live-captions/settings.json and takes precedence.
+#
+# Speech recognition: only ONE plugin may register the `speechToText` service,
+# so this bundle never adds its own copy. It configures the stock rows that the
+# "Voice input" bundle ships, which keeps exactly one registration in every
+# state (no duplicate-service failures, and dictation keeps working).
+
 - insert:
+    - id: sales-copilot-live-captions
+      name: dsh-live-captions
+      config:
+        dataRoot: !!js dshHomePath('live-captions')
+        minSegmentSeconds: 1.2
+        # Audio source: both | speaker | mic. Change it in the caption panel.
+        source: both
+        sourceLanguage: auto
+        targetLanguage: zh
+        translate: true
+        # Default to the free translation bridge that sales-copilot starts.
+        # Switch to cloud or the bundled offline models in the caption panel.
+        translateEngine: local
+        localBaseUrl: http://127.0.0.1:8787/v1
+        localModel: free-google-microsoft
+        # Captions: two lines, source line above the translation, overlay shown.
+        lyricShowSource: true
+        lyricVisible: true
+        keepAudio: false
     - id: sales-copilot
       name: dsh-sales-copilot
+
+# Point the stock speech-recognition rows at the SenseVoice model the captions
+# use. These are plain configuration overrides: they apply when the rows exist
+# and are skipped otherwise, so nothing registers twice.
+- id: speech-to-text
+  config:
+    defaultProvider: sensevoice-local
+- id: speech-to-text-sensevoice
+  config:
+    dataRoot: !!js dshHomePath('speech-to-text', 'sensevoice')
+    threads: 6
+    segmentSeconds: 8

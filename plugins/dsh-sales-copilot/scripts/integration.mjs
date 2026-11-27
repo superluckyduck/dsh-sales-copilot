@@ -217,7 +217,7 @@ check('tts reports itself muted in tests', ttsVoices.body.supported === false, t
 const ttsSpeak = await post('/tts/speak', { text: 'hello', lang: 'en' })
 check('POST /tts/speak refuses without a voice', ttsSpeak.status === 400 && ttsSpeak.body.ok === false, ttsSpeak.body)
 const ttsStop = await post('/tts/stop', {})
-check('POST /tts/stop is harmless when idle', ttsStop.body.ok === true && ttsStop.body.stopped === false, ttsStop.body)
+check('POST /tts/stop is harmless when idle', ttsStop.body.ok === true && ttsStop.body.tts?.speaking === false, ttsStop.body)
 
 /* fake dsh-live-captions ------------------------------------------ */
 let liveStarted = false
@@ -321,8 +321,9 @@ const voiceMeeting = await post('/meeting/create', { title: '语音回答测试'
 const voiceTurn = await post('/meeting/voice-turn', { id: voiceMeeting.body.meeting?.id, timeoutMs: 6000 })
 check('POST /meeting/voice-turn ok', voiceTurn.body.ok === true, voiceTurn.body)
 check('voice turn heard the sentence', String(voiceTurn.body.heard ?? '').includes('five percent'), voiceTurn.body.heard)
-check('voice turn appended a sales message', voiceTurn.body.message?.speaker === 'sales', voiceTurn.body.message)
+check('voice turn appended a customer message (mode-aware)', voiceTurn.body.message?.speaker === 'customer', voiceTurn.body.message)
 check('voice turn restored the captions settings', liveCommands.some((item) => item.action === 'settings' && item.settings?.source === 'speaker'), liveCommands)
+check('voice turn disables translation and pins the language', liveCommands.some((item) => item.action === 'settings' && item.settings?.translate === false && item.settings?.sourceLanguage === 'zh'), liveCommands)
 check('voice turn stopped the capture', liveCommands.filter((item) => item.action === 'stop').length >= 1, liveCommands)
 
 // The import tests above created meetings; remove them so the meeting-count
@@ -376,6 +377,36 @@ check('summary is stored on the meeting', summarized.body.meeting?.summary?.summ
 const meetings = await get('/meetings')
 check('GET /meetings lists one', meetings.body.items?.length === 1, meetings.body.items?.length)
 check('/meetings marks it summarized', meetings.body.items?.[0]?.summarized === true, meetings.body.items?.[0])
+
+/* "我扮客户" must produce a real AI salesperson turn ------------------ */
+const sellerMeeting = await post('/meeting/create', { title: 'AI 销售模式', mode: 'user-customer', roleIds: [] })
+const sellerId = sellerMeeting.body.meeting?.id
+await post('/meeting/message', { id: sellerId, speaker: 'customer', text: '你们价格太贵了，能便宜点吗？' })
+queueModel('标准版年费 6.8 万，量大可以帮您申请一次特批。')
+const sellerTurn = await post('/meeting/turn', { id: sellerId })
+check('user-customer /meeting/turn replies as sales', sellerTurn.body.speaker === 'sales' && sellerTurn.body.message?.speaker === 'sales', sellerTurn.body)
+check('seller reply mentions the product facts', String(sellerTurn.body.message?.text ?? '').includes('6.8 万'), sellerTurn.body.message)
+await post('/meeting/delete', { id: sellerId })
+
+/* hands-free voice-room routes --------------------------------------- */
+const voiceState = await get('/voice-room/state')
+check('GET /voice-room/state ok', voiceState.status === 200 && voiceState.body.voice?.running === false, voiceState.body)
+
+const voiceRoomMeeting = await post('/meeting/create', { title: '语音实时测试', mode: 'ai-customer', roleIds: [roleId] })
+const voiceRoomStarted = await post('/voice-room/start', { id: voiceRoomMeeting.body.meeting?.id })
+check('POST /voice-room/start ok', voiceRoomStarted.body.ok === true && voiceRoomStarted.body.voice?.running === true, voiceRoomStarted.body)
+check('voice room uses captions mic', liveCommands.some((c) => c.action === 'settings' && c.settings?.source === 'mic'), liveCommands)
+const voiceRoomStopped = await post('/voice-room/stop', { id: voiceRoomMeeting.body.meeting?.id })
+check('POST /voice-room/stop ok', voiceRoomStopped.body.ok === true && voiceRoomStopped.body.voice?.running === false, voiceRoomStopped.body)
+check('voice room restores captions source', liveCommands.some((c) => c.action === 'settings' && c.settings?.source === 'speaker'), liveCommands)
+await post('/meeting/delete', { id: voiceRoomMeeting.body.meeting?.id })
+
+/* deleting the meeting that is being roleplayed releases the mic ------ */
+const doomed = await post('/meeting/create', { title: '删除中的语音对练', mode: 'ai-customer', roleIds: [] })
+await post('/voice-room/start', { id: doomed.body.meeting?.id })
+const deletedLive = await post('/meeting/delete', { id: doomed.body.meeting?.id })
+const afterLiveDelete = await get('/voice-room/state')
+check('deleting the live meeting stops the voice room', deletedLive.body.deleted === true && afterLiveDelete.body.voice?.running === false, afterLiveDelete.body)
 
 const detail = await get(`/meeting?id=${meetingId}`)
 check('GET /meeting returns the transcript', detail.body.meeting?.messages?.length === 2, detail.body.meeting?.messages?.length)

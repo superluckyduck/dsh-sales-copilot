@@ -22,6 +22,10 @@ import { fileURLToPath } from 'node:url'
 import { translate, providerLabel } from './providers.mjs'
 import { parsePrompt } from './prompt.mjs'
 
+// Proxy env (HTTPS_PROXY / NODE_USE_ENV_PROXY) must be present at process
+// start; lib/translate-free.js detects the Windows proxy and sets them when
+// spawning this bridge.
+
 const PORT = Number(process.env.PORT ?? 8787)
 const HOST = process.env.HOST ?? '127.0.0.1'
 const MODEL = process.env.MODEL_NAME ?? 'free-google-microsoft'

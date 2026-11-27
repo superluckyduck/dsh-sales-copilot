@@ -9,6 +9,18 @@
 
 const MAX_CONTEXT_MESSAGES = 14
 
+/** How the AI salesperson is expected to sell — product facts live in the FAQ library. */
+const SALES_STYLE = [
+  '你是一位资深 B2B SaaS 销售，正在和一位客户做一对一演练。对话规则：',
+  '- 你是销售方，绝不能替客户说话、不能编造客户会怎么回答、不能跳出角色点评这场演练。',
+  '- 输出只能是你当场要说的那句话本身：不要写内心思考、分析、判断过程、引号、旁白、标题或任何解释性文字。',
+  '- 只在客户刚说的那句话上继续：先回应他的关注点或异议，再推进到下一步（问需求、给证据、谈方案、约下一步）。',
+  '- 用产品资料里的事实说话：报价、版本、实施周期、部署方式、案例只能取自资料，不确定的就说「我确认后给你准确数字」，绝不瞎编。',
+  '- 每次只说 1–3 句口语，像真人销售，不用列表、不用 Markdown、不自我介绍、不说「作为销售」。',
+  '- 不复述客户刚说的话，也不复述自己的开场白；客户没开口前不要长篇介绍。',
+  '- 如果客户始终不说话，才用一句开放式问题把话题打开。',
+].join('\n')
+
 /**
  * The buyer's behaviour contract. Earlier versions let the model "not know the
  * product", which made hard roles answer `Sorry — what exactly do you mean?` to
@@ -17,6 +29,7 @@ const MAX_CONTEXT_MESSAGES = 14
  */
 const BUYER_STYLE = [
   '你是一位真实的 B2B 买家，在自己的公司里有决策权。对话规则：',
+  '- 输出只能是你当场要说的那句话本身：不要写内心思考、分析、判断过程、引号、旁白或任何角色外的文字。',
   '- 你非常熟悉自己的业务：几个仓、什么品类、日均单量、现在用什么系统、哪里最痛、预算范围，你会主动说出具体数字或具体场景。',
   '- 你绝不装听不懂：对方问得合理就直接给信息，然后立刻反问一个对你真正重要的点。',
   '- 你对价格、上线周期、实施风险、同行案例都敏感，会用自己的判断压价、要求证据，或拿别家方案做比较。',
@@ -30,6 +43,11 @@ const PRESSURE = {
   normal:
     '你在同时评估 2–3 家供应商，会拿同业案例、上线周期和报价做比较，会要求 ROI 测算或客户见证；价格上会试探，但讲道理。',
   hard: '你高度怀疑，习惯用竞品报价压价、追问交付细节和失败案例，会质疑对方说法的可信度；语气客气但寸步不让，必要时打断。',
+}
+
+/** Pure: the system prompt for one in-character seller (AI plays the salesperson) turn. */
+export function buildSalesSystem() {
+  return SALES_STYLE
 }
 
 /** Pure: the system prompt for one in-character customer turn. */
@@ -50,6 +68,37 @@ function trim(text, max) {
   return value.length > max ? `${value.slice(0, max)}…` : value
 }
 
+/**
+ * Some reasoning models stream their analysis as ordinary text even with
+ * reasoningEffort='off'. The analysis ends with the actual line, usually
+ * drafted in quotes after a marker such as 可说：/可以说：/回复：. Extract
+ * that spoken line so the roleplay never "speaks" the model's thinking.
+ * Short, clean replies are returned untouched.
+ */
+function extractSpokenLine(text) {
+  let value = String(text ?? '').trim()
+  if (value === '') return value
+  value = value.replace(/```[\s\S]*?```/g, '').trim()
+
+  // The model drafts the final line in quotes after a "say this" marker.
+  const drafts = [...value.matchAll(/(?:可说|可以说|可回答|回复|应说|回答)[：:]?\s*[“"]([^”"]{6,500})[”"]/g)]
+  if (drafts.length > 0) {
+    const last = drafts[drafts.length - 1][1].trim()
+    if (last !== '') return last
+  }
+
+  // Long output with no marker: prefer the longest quoted span, which is the
+  // drafted answer, over the surrounding reasoning.
+  if (value.length > 180) {
+    const quotes = [...value.matchAll(/[“"]([^”"]{8,500})[”"]/g)]
+      .map((match) => match[1].trim())
+      .filter((item) => item !== '')
+    if (quotes.length > 0) return quotes.sort((a, b) => b.length - a.length)[0]
+  }
+
+  return value
+}
+
 function transcriptOf(messages) {
   const recent = messages.slice(-MAX_CONTEXT_MESSAGES)
   return recent
@@ -62,7 +111,7 @@ function transcriptOf(messages) {
 
 function factsOf(store, limit = 6) {
   const entries = [...store.data.qa].slice(0, limit)
-  return entries.map((entry) => `- Q: ${entry.question} | A: ${entry.answer}`).join('\n')
+  return entries.map((entry) => `- Q: ${entry.question} | A: ${entry.answer}${entry.answerEn ? ` / ${entry.answerEn}` : ''}`).join('\n')
 }
 
 export function createMeeting({ store, llm, log }) {
@@ -127,12 +176,56 @@ export function createMeeting({ store, llm, log }) {
   }
 
   /**
+   * One in-character reply from the AI SALESPERSON (mode 'user-customer'): the
+   * user plays the customer, the model plays the sales rep. This is the missing
+   * half of the second practice mode — without it "我扮客户" was just a label.
+   */
+  async function salesTurn({ meeting, instruction = '', language = 'auto' } = {}) {
+    const lang = language === 'en' || language === 'zh' ? language : 'zh'
+    const product = factsOf(store)
+    if (!llm.available()) {
+      const line = lang === 'en'
+        ? "Sure — what's your current setup, and what are you looking to improve?"
+        : '好的，方便说说您现在用的是什么系统、最想解决哪一块吗？'
+      return { text: line, fallback: true }
+    }
+    const transcript = transcriptOf(meeting.messages)
+    try {
+      const raw = await llm.ask({
+        system: buildSalesSystem(),
+        prompt: [
+          product ? `（产品资料，只能引用这里的事实，不要照念、不要编造）\n${product}` : '',
+          transcript ? `当前对话记录：\n${transcript}` : '对话刚刚开始，客户还没开口。用一句简短的开放式问题开场。',
+          instruction ? `本轮的额外指令（必须遵守）：${instruction}` : '',
+          lang === 'en' ? 'Reply in English only, as the salesperson. Output ONLY the line you would say — no reasoning, no analysis, no narration, no quotes.' : '只用中文、以销售身份回复。只输出你当场要说的那句话，不要思考过程、分析、旁白或引号。',
+          '直接输出你要说的那句话。',
+        ]
+          .filter(Boolean)
+          .join('\n\n'),
+        // Reasoning-heavy models need room for their analysis before the
+        // drafted line; extractSpokenLine keeps only the final spoken line.
+        maxTokens: 1200,
+        temperature: 0.75,
+        timeoutMs: 40000,
+      })
+      const text = extractSpokenLine(raw)
+      if (text === '') throw new Error('模型返回空回复')
+      return { text, fallback: false }
+    } catch (error) {
+      log(`meeting: salesTurn failed: ${error?.message ?? error}`)
+      return { text: lang === 'en' ? 'Let me confirm that and get back to you with exact numbers.' : '这个我确认一下，稍后给您准确数字。', fallback: true }
+    }
+  }
+
+  /**
    * One in-character customer reply. `mode: 'user-customer'` means the user
    * plays the customer themselves, so we only speak when explicitly asked.
    */
-  async function customerTurn({ meeting, roleId = '', instruction = '' }) {
+  async function customerTurn({ meeting, roleId = '', instruction = '', language: languageHint = '' }) {
     const role = pickRole(meeting, roleId)
-    const language = role.language === 'en' ? 'en' : 'zh'
+    // Voice practice can override the role's default language with the
+    // language the user actually spoke; normal practice keeps the role setting.
+    const language = languageHint === 'en' || languageHint === 'zh' ? languageHint : (role.language === 'en' ? 'en' : 'zh')
     const product = factsOf(store)
     if (!llm.available()) {
       const line =
@@ -149,16 +242,18 @@ export function createMeeting({ store, llm, log }) {
           product ? `（以下是销售方的产品资料，只用来判断对方的说法是否可信，不要照念，也不要主动报价）\n${product}` : '',
           transcript ? `当前对话记录：\n${transcript}` : '对话刚刚开始，你是第一次和这位销售交谈。先简短说明你的身份和当前情况，不要问「你有什么事」。',
           instruction ? `本轮的额外指令（必须遵守）：${instruction}` : '',
-          language === 'en' ? 'Reply in English only, as the customer. No narration, no quotes.' : '只用中文、以客户身份回复。不要旁白、不要加引号。',
+          language === 'en' ? 'Reply in English only, as the customer. Output ONLY the line you would say — no reasoning, no analysis, no narration, no quotes.' : '只用中文、以客户身份回复。只输出你当场要说的那句话，不要思考过程、分析、旁白或引号。',
           '直接输出你要说的那句话。',
         ]
           .filter(Boolean)
           .join('\n\n'),
-        maxTokens: 300,
+        // Reasoning-heavy models need room for their analysis before the
+        // drafted line; extractSpokenLine keeps only the final spoken line.
+        maxTokens: 1200,
         temperature: 0.85,
         timeoutMs: 40000,
       })
-      const text = String(raw ?? '').trim().replace(/^["“]|["”]$/g, '')
+      const text = extractSpokenLine(raw)
       if (text === '') throw new Error('模型返回空回复')
       return { role, text, fallback: false }
     } catch (error) {
@@ -229,5 +324,5 @@ export function createMeeting({ store, llm, log }) {
     }
   }
 
-  return { suggestRoles, customerTurn, summarize }
+  return { suggestRoles, customerTurn, salesTurn, summarize }
 }
