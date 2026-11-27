@@ -1,0 +1,12 @@
+_*
+_baseline/
+data/
+reports/
+tools/
+session-*.jsonl
+session-*.txt
+*.pid
+*.log
+**/*.log
+**/*.wav
+**/*.pid

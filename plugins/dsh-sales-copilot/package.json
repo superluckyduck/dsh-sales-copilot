@@ -1,6 +1,6 @@
 {
   "name": "dsh-sales-copilot",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "FAQ library + real-time call assist + role-play room with speech and call-import on top of dsh-live-captions",
@@ -18,6 +18,8 @@
     "dsh.plugin.json",
     "locale/*.json",
     "docs",
+    "lib",
+    "native",
     "icon.svg",
     "README.md",
     "scripts"

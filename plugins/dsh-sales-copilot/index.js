@@ -21,6 +21,7 @@ import { createRealtime } from './lib/realtime.js'
 import { createMeeting } from './lib/meeting.js'
 import { createOverlay } from './lib/overlay.js'
 import { createTts } from './lib/tts.js'
+import { createTranslateFree } from './lib/translate-free.js'
 
 const PREFIX = '/sales-copilot/api'
 const TOOL_NAME = 'sales_copilot'
@@ -1562,12 +1563,14 @@ export function apply(ctx, config) {
   const realtime = createRealtime({ store, llm, log, getOrigin })
   const overlay = createOverlay({ root: pluginRoot, log, getOrigin })
   const tts = createTts({ root: pluginRoot, log })
+  const translateFree = createTranslateFree({ root: pluginRoot, log })
   log(`plugin activated, dataRoot=${dataRoot}, qa=${store.data.qa.length}, customers=${store.data.customers.length}`)
 
   ctx.effect(() => () => {
-    realtime.stop()
+    void realtime.stop()
     overlay.dispose()
     tts.stop()
+    translateFree.stop()
     store.flush()
     log('plugin unloading')
   }, 'sales-copilot: store')
@@ -1575,6 +1578,31 @@ export function apply(ctx, config) {
   ctx.inject(['webServer'], (scoped) => {
     const dispose = registerApi({ ctx: scoped, store, log, realtime, meetingRunner, llm, overlay, tts })
     scoped.effect(() => dispose, 'sales-copilot: api')
+    void (async () => {
+      await translateFree.start()
+      const origin = getOrigin()
+      if (!origin) return
+      try {
+        const response = await fetch(`${origin}/live-captions/api/command`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            action: 'settings',
+            settings: {
+              translate: true,
+              translateEngine: 'local',
+              localBaseUrl: 'http://127.0.0.1:8787/v1',
+              localModel: 'free-google-microsoft',
+              targetLanguage: 'zh',
+            },
+          }),
+          signal: AbortSignal.timeout(5000),
+        })
+        if (response.ok) log('translate-free: live captions configured for local free translation')
+      } catch (error) {
+        log(`translate-free: live captions not configured (${error?.message ?? error})`)
+      }
+    })()
   })
 
   ctx.inject(['tools'], (scoped) => {

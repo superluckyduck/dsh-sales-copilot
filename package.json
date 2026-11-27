@@ -1,6 +1,6 @@
 {
   "name": "dsh-sales-copilot",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "开箱即用的中英双语销售助手：FAQ 快查、实时通话辅助、语音对练、通话纪要和客户画像",
   "private": false,
   "type": "module",
@@ -18,16 +18,23 @@
     "README.md"
   ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,
-      "inject": ["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-slots"]
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
     }
   },
-  "engines": { "node": ">=20", "dsh": ">=0.2.0" },
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.2.0"
+  },
   "dependencies": {
     "dsh-live-captions": "^1.1.1"
   }
 }
-

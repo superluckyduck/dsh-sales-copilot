@@ -7,6 +7,7 @@
 将本仓库作为插件包安装，或在 DSH 的插件市场中搜索 `dsh-sales-copilot` 并点击安装。安装包会自动挂载 Host、侧边栏面板和 `sales_copilot` 工具，不需要手动编辑配置文件或填写 API Key。
 
 安装后刷新 DSH 页面，侧边栏会出现「销售助手」。插件自带 FAQ、产品价格、客户角色和示例数据，数据保存在当前用户的 `%USERPROFILE%\\.dsh\\sales-copilot\\db.json`。
+首次启动会自动拉起随包提供的免费翻译桥（127.0.0.1:8787），并自动把 `dsh-live-captions` 配成中文本地翻译；不需要复制脚本、安装 Python、填写地址或配置 API Key。卸载插件时会停止它自己启动的翻译进程。
 
 ## 已包含
 
